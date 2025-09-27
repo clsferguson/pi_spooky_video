@@ -3,7 +3,7 @@ set -e
 
 SERVICE_NAME="video-button.service"
 SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
-SCRIPT_PATH="/home/pi/video_button_runner.py"
+SCRIPT_PATH="/home/pi/pi_spooky_video/video_button_runner.py"
 
 # Check script exists
 if [ ! -f "$SCRIPT_PATH" ]; then
