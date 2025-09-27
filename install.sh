@@ -12,6 +12,12 @@ if [ ! -f "$SCRIPT_PATH" ]; then
   exit 1
 fi
 
+
+echo "🔧 Installing dependencies"
+sudo apt update
+sudo apt install -y mpv python3-gpiozero python3-pip python3-psutil
+
+
 # Create systemd unit file
 echo "🔧 Creating $SERVICE_PATH..."
 sudo tee "$SERVICE_PATH" > /dev/null <<EOL
