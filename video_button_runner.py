@@ -3,6 +3,7 @@ import os, time, json, socket, shutil, glob, subprocess, psutil, argparse
 from pathlib import Path
 from gpiozero import Button
 from shutil import which
+from typing import Optional
 
 # ------------------ CONFIG ------------------
 TARGET_DIR = Path.home() / "videos"
@@ -133,7 +134,7 @@ def perform_copy_and_unmount(needs_list) -> bool:
             unmount_path(mnt)
     return copied_any
 
-def pick_video_from_target() -> Path | None:
+def pick_video_from_target() -> Optional[Path]:
     if not TARGET_DIR.exists():
         return None
     vids = [p for p in TARGET_DIR.iterdir() if p.suffix.lower() in VIDEO_EXTS and p.is_file()]
