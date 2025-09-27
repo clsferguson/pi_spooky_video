@@ -1,32 +1,28 @@
 #!/usr/bin/env python3
-import os, time, json, socket, shutil, glob, subprocess, psutil, argparse
+import os, time, json, socket, shutil, glob, subprocess, psutil
 from pathlib import Path
 from gpiozero import Button
-from shutil import which
-from typing import Optional
 
 # ------------------ CONFIG ------------------
 TARGET_DIR = Path.home() / "videos"
 USB_MOUNT_BASE = Path("/media")
 USB_DEFAULT_MOUNT = USB_MOUNT_BASE / "usb"     # e.g., /media/usb
 VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".avi", ".m4v")
-BUTTON_PIN = 24  # BCM numbering (physical header pin 18)
-
-# mpv config
+BUTTON_PIN = 24  # BCM numbering. pin 18
 IPC_SOCK = "/tmp/mpv-video-sock"
 MPV = "mpv"
 MPV_BASE_ARGS = [
-    MPV, "--fs", "--pause", "--keep-open=always", "--idle=yes",
-    "--no-osd-bar", f"--input-ipc-server={IPC_SOCK}", "--really-quiet",
+    MPV,
+    "--fs",
+    "--pause",                 # we’ll unpause when needed
+    "--keep-open=always",
+    "--idle=yes",
+    "--no-osd-bar",
+    f"--input-ipc-server={IPC_SOCK}",
+    "--really-quiet",
 ]
-
-# omxplayer config
-OMXPLAYER = "omxplayer"
-OMX_BASE_ARGS = [OMXPLAYER, "--no-osd", "--blank"]  # add --adev/local if needed
 # --------------------------------------------
 
-
-# ============ Utility: filesystem & USB ============
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 
@@ -94,19 +90,119 @@ def copy_new_videos(src_dir: Path, dst_dir: Path) -> bool:
             dst = dst_dir / name
             try:
                 if not dst.exists():
-                    shutil.copy2(src, dst); copied_any = True
+                    shutil.copy2(src, dst)
+                    copied_any = True
                 else:
                     sstat, dstat = src.stat(), dst.stat()
                     if (sstat.st_size != dstat.st_size) or (int(sstat.st_mtime) != int(dstat.st_mtime)):
-                        shutil.copy2(src, dst); copied_any = True
+                        shutil.copy2(src, dst)
+                        copied_any = True
             except Exception:
                 pass
     return copied_any
 
+def scan_usb_candidates(mnt: Path):
+    # Places to search within a mounted USB
+    return [mnt, mnt / "videos", mnt / "Videos", mnt / "media"]
+
+def pick_video_from_target() -> Path | None:
+    if not TARGET_DIR.exists():
+        return None
+    vids = [p for p in TARGET_DIR.iterdir() if p.suffix.lower() in VIDEO_EXTS and p.is_file()]
+    if not vids:
+        return None
+    vids.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return vids[0]
+
+def kill_existing_mpv():
+    if os.path.exists(IPC_SOCK):
+        try: os.remove(IPC_SOCK)
+        except Exception: pass
+    for p in psutil.process_iter(attrs=["name", "cmdline"]):
+        try:
+            if p.info["name"] == "mpv" or (p.info["cmdline"] and "mpv" in p.info["cmdline"][0]):
+                p.terminate()
+        except Exception:
+            pass
+    psutil.wait_procs(psutil.process_iter(), timeout=0.1)
+
+def stop_mpv(proc):
+    """Gracefully stop the running MPV instance."""
+    try:
+        # Try IPC quit
+        mpv_cmd({"command": ["quit"]})
+        time.sleep(0.2)
+    except Exception:
+        pass
+    if proc and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    # Clean socket
+    if os.path.exists(IPC_SOCK):
+        try: os.remove(IPC_SOCK)
+        except Exception: pass
+
+def start_mpv(file_path: Path):
+    kill_existing_mpv()
+    cmd = MPV_BASE_ARGS + [str(file_path)]
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def mpv_cmd(obj):
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.connect(IPC_SOCK)
+                s.sendall((json.dumps(obj) + "\n").encode("utf-8"))
+                try:
+                    s.settimeout(0.2)
+                    s.recv(4096)
+                except Exception:
+                    pass
+                return True
+        except (FileNotFoundError, ConnectionRefusedError):
+            time.sleep(0.05)
+    return False
+
+def mpv_set_pause(val: bool):
+    mpv_cmd({"command":["set_property","pause", bool(val)]})
+
+def mpv_seek_zero_and_pause_show_first_frame():
+    mpv_cmd({"command":["set_property","pause", True]})
+    mpv_cmd({"command":["seek", 0, "absolute", "exact"]})
+    mpv_cmd({"command":["frame-step"]})
+
+def mpv_get_eof_reached() -> bool:
+    req = {"command":["get_property","eof-reached"]}
+    deadline = time.time() + 0.5
+    while time.time() < deadline:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.connect(IPC_SOCK)
+                s.sendall((json.dumps(req)+"\n").encode("utf-8"))
+                s.settimeout(0.2)
+                data = s.recv(4096)
+                if not data:
+                    return False
+                try:
+                    resp = json.loads(data.decode("utf-8", errors="ignore").splitlines()[-1])
+                    return bool(isinstance(resp, dict) and resp.get("data") is True)
+                except Exception:
+                    return False
+        except Exception:
+            time.sleep(0.05)
+    return False
+
 def check_usb_for_updates():
     """
-    Mount USB partitions if needed. If copy required from any, return list of (mnt, mounted_by_us).
-    Unmount immediately if nothing needed and we mounted it.
+    Mount any USB partitions if needed, decide if copy is needed, and (only if needed)
+    return a list of (mountpoint, mounted_by_us) to copy from. If none, returns [].
     """
     needs = []
     for dev in usb_partitions():
@@ -117,14 +213,20 @@ def check_usb_for_updates():
             for cand in scan_usb_candidates(mnt):
                 if would_copy_new_videos(cand, TARGET_DIR):
                     needs.append((mnt, mounted_by_us))
+                    # one hit per device is enough; break to avoid duplicates
                     raise StopIteration
         except StopIteration:
             pass
+        # If nothing needed and we mounted it, unmount immediately
         if (mnt, mounted_by_us) not in needs and mounted_by_us:
             unmount_path(mnt)
     return needs
 
 def perform_copy_and_unmount(needs_list) -> bool:
+    """
+    For each (mountpoint, mounted_by_us) in needs_list, copy and then unmount if mounted_by_us.
+    Returns True if anything was copied.
+    """
     copied_any = False
     for mnt, mounted_by_us in needs_list:
         for cand in scan_usb_candidates(mnt):
@@ -134,281 +236,76 @@ def perform_copy_and_unmount(needs_list) -> bool:
             unmount_path(mnt)
     return copied_any
 
-def pick_video_from_target() -> Optional[Path]:
-    if not TARGET_DIR.exists():
-        return None
-    vids = [p for p in TARGET_DIR.iterdir() if p.suffix.lower() in VIDEO_EXTS and p.is_file()]
-    if not vids:
-        return None
-    vids.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return vids[0]
-
-
-# ============ Player Abstraction ============
-class BasePlayer:
-    def start_paused(self, file_path: Path): ...
-    def start_playing(self, file_path: Path): ...
-    def play(self): ...
-    def pause(self): ...
-    def show_first_frame_paused(self): ...
-    def is_eof(self) -> bool: ...
-    def stop(self): ...
-
-class MPVPlayer(BasePlayer):
-    def __init__(self):
-        self.proc = None
-
-    def _kill_existing(self):
-        if os.path.exists(IPC_SOCK):
-            try: os.remove(IPC_SOCK)
-            except Exception: pass
-        for p in psutil.process_iter(attrs=["name","cmdline"]):
-            try:
-                if p.info["name"] == "mpv" or (p.info["cmdline"] and "mpv" in p.info["cmdline"][0]):
-                    p.terminate()
-            except Exception:
-                pass
-        psutil.wait_procs(psutil.process_iter(), timeout=0.1)
-
-    def _wait_ipc(self, timeout=2.5):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if os.path.exists(IPC_SOCK): return True
-            time.sleep(0.05)
-        return False
-
-    def _ipc(self, obj, timeout=2.0):
-        end = time.time() + timeout
-        while time.time() < end:
-            try:
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                    s.connect(IPC_SOCK)
-                    s.sendall((json.dumps(obj) + "\n").encode("utf-8"))
-                    try:
-                        s.settimeout(0.2)
-                        s.recv(4096)
-                    except Exception:
-                        pass
-                    return True
-            except (FileNotFoundError, ConnectionRefusedError):
-                time.sleep(0.05)
-        return False
-
-    def start_paused(self, file_path: Path):
-        self._kill_existing()
-        self.proc = subprocess.Popen(MPV_BASE_ARGS + [str(file_path)],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self._wait_ipc()
-        self.show_first_frame_paused()
-
-    def start_playing(self, file_path: Path):
-        self._kill_existing()
-        # start paused then immediately unpause (consistency)
-        self.proc = subprocess.Popen(MPV_BASE_ARGS + [str(file_path)],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self._wait_ipc()
-        self._ipc({"command":["set_property","pause", False]})
-
-    def play(self):
-        self._ipc({"command":["set_property","pause", False]})
-
-    def pause(self):
-        self._ipc({"command":["set_property","pause", True]})
-
-    def show_first_frame_paused(self):
-        self._ipc({"command":["set_property","pause", True]})
-        self._ipc({"command":["seek", 0, "absolute", "exact"]})
-        self._ipc({"command":["frame-step"]})
-
-    def is_eof(self) -> bool:
-        req = {"command":["get_property","eof-reached"]}
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                s.connect(IPC_SOCK)
-                s.sendall((json.dumps(req)+"\n").encode("utf-8"))
-                s.settimeout(0.2)
-                data = s.recv(4096)
-                if not data: return False
-                resp = json.loads(data.decode("utf-8", errors="ignore").splitlines()[-1])
-                return bool(isinstance(resp, dict) and resp.get("data") is True)
-        except Exception:
-            return False
-
-    def stop(self):
-        try: self._ipc({"command":["quit"]})
-        except Exception: pass
-        if self.proc and self.proc.poll() is None:
-            try:
-                self.proc.terminate()
-                self.proc.wait(timeout=1.0)
-            except Exception:
-                try: self.proc.kill()
-                except Exception: pass
-        if os.path.exists(IPC_SOCK):
-            try: os.remove(IPC_SOCK)
-            except Exception: pass
-
-class OMXPlayer(BasePlayer):
-    """
-    Controls omxplayer via stdin.
-    - Start paused with --pause to show first frame.
-    - Play/pause by sending 'p' to stdin.
-    - Stop by sending 'q' or terminating the process.
-    - 'show_first_frame_paused' is implemented by restarting paused at t=0
-      to avoid dealing with escape sequences for seeking over stdin.
-    """
-    def __init__(self):
-        self.proc = None
-
-    def _start(self, file_path: Path, paused: bool):
-        # Build args. --pause makes it start paused at first frame.
-        args = OMX_BASE_ARGS[:]
-        if paused:
-            args += ["--pause"]
-        args += [str(file_path)]
-        # Use a pipe to send key commands
-        self.proc = subprocess.Popen(args, stdin=subprocess.PIPE,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    def start_paused(self, file_path: Path):
-        self.stop()
-        self._start(file_path, paused=True)
-
-    def start_playing(self, file_path: Path):
-        self.stop()
-        # Start paused then unpause immediately (ensures consistent first-frame display)
-        self._start(file_path, paused=True)
-        time.sleep(0.1)
-        self.play()
-
-    def _send_key(self, key: str):
-        if self.proc and self.proc.poll() is None and self.proc.stdin:
-            try:
-                self.proc.stdin.write(key.encode("utf-8"))
-                self.proc.stdin.flush()
-            except Exception:
-                pass
-
-    def play(self):
-        # 'p' toggles pause; ensure we send 'p' to unpause from paused state
-        self._send_key('p')
-
-    def pause(self):
-        # toggles as well; for our flow we don't need two-way state tracking
-        self._send_key('p')
-
-    def show_first_frame_paused(self):
-        # For simplicity, restart paused at t=0 to render first frame
-        if self.proc and self.proc.poll() is None:
-            self.stop()
-        # We don't know the file here; caller will call start_paused(file)
-        # so this method is not used standalone in the omx path.
-        pass
-
-    def is_eof(self) -> bool:
-        # omxplayer exits when playback finishes
-        return self.proc is not None and (self.proc.poll() is not None)
-
-    def stop(self):
-        if self.proc and self.proc.poll() is None:
-            try:
-                self._send_key('q')
-                self.proc.wait(timeout=1.0)
-            except Exception:
-                try: self.proc.terminate()
-                except Exception: pass
-        self.proc = None
-
-
-# ============ Driver / main loop ============
-def pick_player(mode: str):
-    mode = (mode or "auto").lower()
-    env_mode = os.environ.get("VIDEO_PLAYER", "").lower().strip()
-    if env_mode in ("mpv","omxplayer"):
-        mode = env_mode
-
-    if mode == "mpv":
-        if which(MPV): return "mpv", MPVPlayer()
-        raise RuntimeError("mpv requested but not found in PATH")
-    if mode == "omxplayer":
-        if which(OMXPLAYER): return "omxplayer", OMXPlayer()
-        raise RuntimeError("omxplayer requested but not found in PATH")
-
-    # auto
-    if which(MPV):
-        return "mpv", MPVPlayer()
-    if which(OMXPLAYER):
-        return "omxplayer", OMXPlayer()
-    raise RuntimeError("Neither mpv nor omxplayer found. Install one: sudo apt install mpv OR sudo apt install omxplayer")
-
-def main_loop(player_mode: str):
+def main_loop():
     ensure_dir(TARGET_DIR)
     button = Button(BUTTON_PIN, pull_up=True, bounce_time=0.05)
-    player_name, player = pick_player(player_mode)
-
     last_loaded = None
-    current_file = None
+    mpv_proc = None
 
     while True:
-        # Phase A: check USB; if updates needed, stop player, copy, unmount, then PLAY immediately
+        # Phase A: see if any USB has updates; only then we’ll close mpv and copy
         needs_list = check_usb_for_updates()
         if needs_list:
-            if hasattr(player, "stop"):
-                player.stop()
+            # 1) Close current video instance BEFORE copying
+            if mpv_proc and mpv_proc.poll() is None:
+                stop_mpv(mpv_proc)
+                mpv_proc = None
+
+            # 2) Copy, then UNMOUNT USB (only those we mounted)
             copied = perform_copy_and_unmount(needs_list)
+
+            # 3) If anything copied, start playing immediately
             if copied:
                 chosen = pick_video_from_target()
                 if chosen:
-                    current_file = chosen
-                    player.start_playing(chosen)  # start playing immediately after copy
-                    # Wait until playback ends
+                    mpv_proc = start_mpv(chosen)
+                    # wait for IPC socket to appear then unpause to play
+                    for _ in range(50):
+                        if os.path.exists(IPC_SOCK): break
+                        time.sleep(0.05)
+                    mpv_set_pause(False)
+
+                    # Wait for EOF then continue loop to re-check USB
                     while True:
-                        if player.is_eof():
+                        if mpv_get_eof_reached():
+                            break
+                        if mpv_proc.poll() is not None:
                             break
                         time.sleep(0.1)
-                    # go back to loop (will idle-show first frame)
+                    # After EOF, continue (don’t reload unless new copy next time)
                     continue
 
-        # Phase B: normal idle → show first frame paused, wait button, then play
+        # Phase B: normal idle behavior (no new files): show first frame paused, wait for button
         chosen = pick_video_from_target()
         if not chosen:
             time.sleep(2)
             continue
 
-        # (Re)show first frame paused
-        if (last_loaded is None) or (chosen != last_loaded):
-            current_file = chosen
-            # MPV can seek & frame-step; OMX we (re)start paused to show frame 1
-            if isinstance(player, MPVPlayer):
-                player.start_paused(chosen)
-            else:
-                player.start_paused(chosen)
+        # (Re)start or ensure paused at first frame
+        if (last_loaded is None) or (chosen != last_loaded) or (mpv_proc is None or mpv_proc.poll() is not None):
+            mpv_proc = start_mpv(chosen)
+            for _ in range(50):
+                if os.path.exists(IPC_SOCK): break
+                time.sleep(0.05)
+            mpv_seek_zero_and_pause_show_first_frame()
             last_loaded = chosen
         else:
-            if isinstance(player, MPVPlayer):
-                player.show_first_frame_paused()
-            else:
-                # Restart paused to guarantee first frame
-                player.start_paused(current_file)
+            mpv_seek_zero_and_pause_show_first_frame()
 
-        # Wait for button to start
+        # Wait for button to start playback
         button.wait_for_press()
-        player.play()
+        mpv_set_pause(False)
 
-        # Wait until EOF
+        # Play until EOF, then loop (show first frame paused again next cycle)
         while True:
-            if player.is_eof():
+            if mpv_get_eof_reached():
+                break
+            if mpv_proc.poll() is not None:
                 break
             time.sleep(0.1)
 
-        # Loop back; next cycle will present first frame paused again
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Play video on GPIO button with mpv or omxplayer.")
-    parser.add_argument("--player", choices=["auto","mpv","omxplayer"], default="auto",
-                        help="Select player backend (default: auto)")
-    args = parser.parse_args()
     try:
-        main_loop(args.player)
+        main_loop()
     except KeyboardInterrupt:
         pass
