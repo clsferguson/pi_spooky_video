@@ -49,3 +49,13 @@ Video player script for raspberry pi triggered by button attached to GPIO
 * Picks the newest video in ~/videos automatically if multiple files exist.
 * Works even if no USB is connected (reuses existing videos in ~/videos).
 * Supports multiple video formats: .mp4, .mov, .mkv, .avi, .m4v.
+
+
+## Install
+clone this repo and run install script.
+
+```
+git@github.com:roymacdonald/pi_spooky_video.git
+cd pi_spooky_video
+sudo ./install.sh
+```
