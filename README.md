@@ -55,7 +55,7 @@ Video player script for raspberry pi triggered by button attached to GPIO
 clone this repo and run install script.
 
 ```
-git@github.com:roymacdonald/pi_spooky_video.git
+git clone https://github.com/roymacdonald/pi_spooky_video.git
 cd pi_spooky_video
 sudo ./install.sh
 ```
