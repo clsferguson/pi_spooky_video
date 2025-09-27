@@ -27,7 +27,7 @@ Video player script for raspberry pi triggered by button attached to GPIO
 * Waits for a button press to start.
 
 ### 🖲 Button trigger (GPIO)
-* Uses gpiozero.Button on BCM pin 18 (or BCM 24 if physical pin 18).
+* Uses gpiozero.Button on BCM pin 24 (physical pin 18).
 * Internal pull-up enabled, so wiring is simple (button between pin and GND).
 * Button press → unpauses playback from the first frame.
 
