@@ -43,6 +43,15 @@ NoNewPrivileges=false
 WantedBy=multi-user.target
 EOL
 
+VIDEOS_DIR="/home/pi/videos"
+# Check if it exists
+if [ ! -d "$VIDEOS_DIR" ]; then
+    echo "Directory $VIDEOS_DIR does not exist. Creating it..."
+    mkdir -p "$VIDEOS_DIR"
+# else
+    # echo "Directory $VIDEOS_DIR already exists."
+fi
+
 # Reload systemd to pick up the new service
 echo "🔄 Reloading systemd..."
 sudo systemctl daemon-reload
