@@ -43,7 +43,7 @@ NoNewPrivileges=false
 WantedBy=multi-user.target
 EOL
 
-VIDEOS_DIR="/home/pi/videos"
+VIDEOS_DIR="/home/root/videos"
 # Check if it exists
 if [ ! -d "$VIDEOS_DIR" ]; then
     echo "Directory $VIDEOS_DIR does not exist. Creating it..."
