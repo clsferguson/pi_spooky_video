@@ -2,6 +2,7 @@
 import os, time, json, socket, shutil, glob, subprocess, psutil
 from pathlib import Path
 from gpiozero import Button
+import time
 
 # ------------------ CONFIG ------------------
 TARGET_DIR = Path.home() / "videos"
@@ -22,6 +23,11 @@ MPV_BASE_ARGS = [
     "--really-quiet",
 ]
 # --------------------------------------------
+
+
+current_video_duration = None
+video_deadline = None
+
 
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
@@ -112,6 +118,8 @@ def pick_video_from_target() -> Path | None:
     if not vids:
         return None
     vids.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    global current_video_duration
+    current_video_duration = get_duration_seconds(vids[0])
     return vids[0]
 
 def kill_existing_mpv():
@@ -171,7 +179,10 @@ def mpv_cmd(obj):
     return False
 
 def mpv_set_pause(val: bool):
+    if val is False:
+        set_video_deadline()
     mpv_cmd({"command":["set_property","pause", bool(val)]})
+
 
 def mpv_seek_zero_and_pause_show_first_frame():
     mpv_cmd({"command":["set_property","pause", True]})
@@ -236,8 +247,41 @@ def perform_copy_and_unmount(needs_list) -> bool:
             unmount_path(mnt)
     return copied_any
 
+
+def get_duration_seconds(path):
+    """Return duration in seconds using ffprobe if available, else 0.0."""
+    try:
+        import subprocess
+        out = subprocess.check_output([
+            "ffprobe","-v","error","-show_entries","format=duration",
+            "-of","default=noprint_wrappers=1:nokey=1", str(path)
+        ], stderr=subprocess.DEVNULL).decode().strip()
+        return float(out)
+    except Exception:
+        return 0.0
+
+
 def log(msg):
     print(f"[VIDEO_RUNNER] {msg}", flush=True)
+
+def set_video_deadline():
+    slack = 5.0
+    global current_video_duration
+    global video_deadline
+    video_deadline = time.time() + (current_video_duration + slack if current_video_duration > 0 else 60)    
+    log("video deadline: ")
+    log(video_deadline)
+    log("current_video_duration: ")
+    log(current_video_duration)
+
+def end_of_file_watchdog():
+    global video_deadline
+    if video_deadline is not None:
+        return time.time() > video_deadline:
+    else
+        return False
+
+
 
 def main_loop():
     ensure_dir(TARGET_DIR)
@@ -280,6 +324,7 @@ def main_loop():
 
         # Phase B: normal idle behavior (no new files): show first frame paused, wait for button
         chosen = pick_video_from_target()
+
         if not chosen:
             time.sleep(2)
             continue
@@ -307,6 +352,9 @@ def main_loop():
                 log("end of file")
                 break
             if mpv_proc.poll() is not None:
+                break
+            if end_of_file_watchdog():
+                log("end_of_file_watchdog")
                 break
             time.sleep(0.1)
 
