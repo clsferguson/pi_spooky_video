@@ -236,6 +236,9 @@ def perform_copy_and_unmount(needs_list) -> bool:
             unmount_path(mnt)
     return copied_any
 
+def log(msg):
+    print(f"[VIDEO_RUNNER] {msg}", flush=True)
+
 def main_loop():
     ensure_dir(TARGET_DIR)
     button = Button(BUTTON_PIN, pull_up=True, bounce_time=0.05)
@@ -293,15 +296,15 @@ def main_loop():
             mpv_seek_zero_and_pause_show_first_frame()
 
         # Wait for button to start playback
-        print("wait for button")
+        log("wait for button")
         button.wait_for_press()
-        print("unpause video")
+        log("unpause video")
         mpv_set_pause(False)
 
         # Play until EOF, then loop (show first frame paused again next cycle)
         while True:
             if mpv_get_eof_reached():
-                print("end of file")
+                log("end of file")
                 break
             if mpv_proc.poll() is not None:
                 break
