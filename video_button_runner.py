@@ -293,12 +293,15 @@ def main_loop():
             mpv_seek_zero_and_pause_show_first_frame()
 
         # Wait for button to start playback
+        print("wait for button")
         button.wait_for_press()
+        print("unpause video")
         mpv_set_pause(False)
 
         # Play until EOF, then loop (show first frame paused again next cycle)
         while True:
             if mpv_get_eof_reached():
+                print("end of file")
                 break
             if mpv_proc.poll() is not None:
                 break
