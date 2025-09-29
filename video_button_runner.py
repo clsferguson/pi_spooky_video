@@ -277,7 +277,7 @@ def set_video_deadline():
 def end_of_file_watchdog():
     global video_deadline
     if video_deadline is not None:
-        return time.time() > video_deadline:
+        return time.time() > video_deadline
     else
         return False
 
