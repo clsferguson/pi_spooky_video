@@ -15,8 +15,7 @@ fi
 
 echo "🔧 Installing dependencies"
 sudo apt update
-sudo apt install -y mpv python3-gpiozero python3-pip python3-psutil
-
+sudo apt install -y mpv python3-gpiozero python3-pip python3-psutil python3-flask ffmpeg
 
 # Create systemd unit file
 echo "🔧 Creating $SERVICE_PATH..."
@@ -43,13 +42,10 @@ NoNewPrivileges=false
 WantedBy=multi-user.target
 EOL
 
-VIDEOS_DIR="/home/root/videos"
-# Check if it exists
+VIDEOS_DIR="/root/videos" 
 if [ ! -d "$VIDEOS_DIR" ]; then
     echo "Directory $VIDEOS_DIR does not exist. Creating it..."
     mkdir -p "$VIDEOS_DIR"
-# else
-    # echo "Directory $VIDEOS_DIR already exists."
 fi
 
 # Reload systemd to pick up the new service
