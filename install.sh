@@ -12,10 +12,9 @@ if [ ! -f "$SCRIPT_PATH" ]; then
   exit 1
 fi
 
-
 echo "🔧 Installing dependencies"
 sudo apt update
-sudo apt install -y mpv python3-gpiozero python3-pip python3-psutil python3-flask ffmpeg
+sudo apt install -y mpv python3-gpiozero python3-pip python3-psutil python3-flask ffmpeg samba samba-common-bin
 
 # Create systemd unit file
 echo "🔧 Creating $SERVICE_PATH..."
@@ -26,13 +25,11 @@ After=network-online.target
 
 [Service]
 Type=simple
-# User=pi
 ExecStart=/usr/bin/env python3 $SCRIPT_PATH
 Restart=always
 RestartSec=2
 
-# If you want USB mounting from within the script, run as root instead of pi
-# and uncomment below:
+# Run as root to allow USB mounts and access /root/videos
 User=root
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
 AmbientCapabilities=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
@@ -42,10 +39,54 @@ NoNewPrivileges=false
 WantedBy=multi-user.target
 EOL
 
-VIDEOS_DIR="/root/videos" 
+# Ensure videos directory exists for both the service and Samba share
+VIDEOS_DIR="/root/videos"
 if [ ! -d "$VIDEOS_DIR" ]; then
-    echo "Directory $VIDEOS_DIR does not exist. Creating it..."
-    mkdir -p "$VIDEOS_DIR"
+    echo "📁 Creating $VIDEOS_DIR ..."
+    sudo mkdir -p "$VIDEOS_DIR"
+fi
+sudo chmod -R 0777 "$VIDEOS_DIR"
+
+# Configure Samba with the exact smb.conf required
+echo "🔧 Writing /etc/samba/smb.conf ..."
+sudo cp -a /etc/samba/smb.conf "/etc/samba/smb.conf.backup.$(date +%Y%m%d%H%M%S)" || true
+sudo bash -c 'cat > /etc/samba/smb.conf << "EOF"
+[global]
+server string = pi4
+workgroup = WORKGROUP
+security = user
+map to guest = Bad User
+name resolve order = bcast host
+local master = no
+domain master = no
+preferred master = no
+
+[videos]
+path = /root/videos
+force user = root
+force group = root
+create mask = 0777
+force create mode = 0777
+directory mask = 0777
+force directory mode = 0777
+public = yes
+writeable = yes
+guest ok = yes
+EOF'
+
+echo "🔎 Validating Samba configuration ..."
+sudo testparm -s >/dev/null
+
+echo "🔄 Enabling and starting smbd ..."
+sudo systemctl enable --now smbd
+
+# Open Samba ports if UFW is active
+if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -qi active; then
+  echo "🌐 UFW detected; allowing Samba ports ..."
+  sudo ufw allow 445/tcp || true
+  sudo ufw allow 139/tcp || true
+  sudo ufw allow 137/udp || true
+  sudo ufw allow 138/udp || true
 fi
 
 # Reload systemd to pick up the new service
@@ -63,3 +104,7 @@ sudo systemctl start "$SERVICE_NAME"
 # Check status
 echo "ℹ️ Checking service status..."
 sudo systemctl --no-pager --full status "$SERVICE_NAME"
+
+# Show how to reach the Samba share
+IP=$(hostname -I 2>/dev/null | awk "{print \$1}")
+echo "✅ Samba share ready at //${IP}/videos (guest access enabled)"
